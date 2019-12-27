@@ -32,21 +32,22 @@
 
 static int yuv_diff(uint32_t yuv1, uint32_t yuv2)
 {
-#define YMASK 0xff0000
-#define UMASK 0x00ff00
-#define VMASK 0x0000ff
+#define YMASK 0xfff00000u
+#define UMASK 0xffc00u
+#define VMASK 0x3ffu
 #define ABSDIFF(a,b) (abs((int)(a)-(int)(b)))
 
-    return ABSDIFF(yuv1 & YMASK, yuv2 & YMASK) > (48 << 16) ||
-           ABSDIFF(yuv1 & UMASK, yuv2 & UMASK) > ( 7 <<  8) ||
-           ABSDIFF(yuv1 & VMASK, yuv2 & VMASK) > ( 6 <<  0);
+    return ABSDIFF(yuv1 & YMASK, yuv2 & YMASK) > (768 << 20) ||
+           ABSDIFF(yuv1 & UMASK, yuv2 & UMASK) > ( 28 <<  10) ||
+           ABSDIFF(yuv1 & VMASK, yuv2 & VMASK) > ( 24 <<  10);
 }
 
 /* (c1*w1 + c2*w2) >> s */
-static uint32_t interp_2px(uint32_t c1, int w1, uint32_t c2, int w2, int s)
+static uint32_t interp_2px(uint32_t c1, unsigned w1, uint32_t c2, unsigned w2, unsigned s)
 {
-    return (((((c1 & 0xff00ff00) >> 8) * w1 + ((c2 & 0xff00ff00) >> 8) * w2) << (8 - s)) & 0xff00ff00) |
-           (((((c1 & 0x00ff00ff)     ) * w1 + ((c2 & 0x00ff00ff)     ) * w2) >>      s ) & 0x00ff00ff);
+  (((c1 >> 20) & 0xfff) * w1 + ((c2 >> 20) & 0xfff) * w2) << (20 - s)
+    //return (((((c1 & 0xffc00) >> 10) * w1 + ((c2 & 0xffc00) >> 10) * w2) << (10 - s)) & 0xffc00) |
+    //       ((((c1 & 0xfff003ff) * w1 + (c2 & 0xfff003ff) * w2) >> s) & 0xfff003ff);
 }
 
 /* (c1*w1 + c2*w2 + c3*w3) >> s */
