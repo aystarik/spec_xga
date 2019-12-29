@@ -59,35 +59,19 @@ static uint32_t yuv_colors[16];
 static uint32_t rgb_colors[16];
 
 static uint32_t rgb2yuv(const uint8_t r, const uint8_t g, const uint8_t b) {
-  int y = round(4.784*r + 9.392*g + 1.824*b);
-  int u = round(-0.67494*r - 1.32505*g + 2.0*b + 512);
-  int v = round(2.0*r - 1.67476*g - 0.32526*b + 512);
-  if (y < 0)
-    y = 0;
-  if (y > 4095)
-    y = 4095;
-  if (u < 0)
-    u = 0;
-  if (u > 1023)
-    u = 1023;
-  if (v < 0)
-    v = 0;
-  if (v > 1023)
-    v = 1023;
-  //if (y > 0xff || u > 0xff || v > 0xff)
-    //printf("rgb(%d,%d,%d)->yuv(%d,%d,%d)\n", r,g,b,y,u,v);
-  uint32_t res =  (y & 0xfff) << 20 | (u & 0x3ff) << 10 | (v & 0x3ff);
-  return res;
+    unsigned y = round(4.784*r + 9.392*g + 1.824*b);
+    int u = round(-0.67494*r - 1.32505*g + 2.0*b)+512;
+    int v = round(2.0*r - 1.67476*g - 0.32526*b)+512;
+  return (y & 0xfff) << 20 | (u & 0x3ff) << 10 | (v & 0x3ff);
 }
 
 static void yuv2rgb(const uint32_t yuv, int &r, int &g, int &b) {
-  int y = (int)(yuv >> 20);
+  unsigned y = ((yuv >> 20) & 0xfff);
   int u = ((yuv >> 10) & 0x3ff) - 512;
   int v = (yuv & 0x3ff) - 512;
   r = round(6.25e-2 * y             + 0.3505 * v);
   g = round(6.25e-2 * y - 8.604e-2 * u - 0.17853 * v);
   b = round(6.25e-2 * y + 0.443 * u);
-  //printf("yuv(%d,%d,%d)->rgb(%d,%d,%d)\n", y,u,v,r,g,b);
 }
 
 SDL_Renderer *renderer;
@@ -106,11 +90,6 @@ void initVideo()
       rgb_colors[i * 8 + j] = r << 16 | g << 8 | b;
       uint32_t yuv = rgb2yuv(r, g, b);
       yuv_colors[i * 8 + j] = yuv;
-      int rx, gx, bx;
-      yuv2rgb(yuv, rx, gx, bx);
-      //if (r != rx | g !=gx | b != bx) {
-      printf("rgb(%d,%d,%d)->rgb2(%d,%d,%d)\n", r,g,b,rx,gx,bx);
-      //}
     }
   }
 }
@@ -190,7 +169,7 @@ int main(int argc, char *argv[])
   initVideo();
 #if 1
   do {
-    //draw();
+    draw();
     SDL_Delay(200);
   } while (handleInput() >= 0);
 #endif

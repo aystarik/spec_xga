@@ -30,31 +30,55 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-static int yuv_diff(uint32_t yuv1, uint32_t yuv2)
-{
-#define YMASK 0xfff00000u
-#define UMASK 0xffc00u
-#define VMASK 0x3ffu
-#define ABSDIFF(a,b) (abs((int)(a)-(int)(b)))
+const uint32_t YMASK = 0xfff00000u;
+const uint32_t UMASK = 0xffc00u;
+const uint32_t VMASK = 0x3ffu;
 
-    return ABSDIFF(yuv1 & YMASK, yuv2 & YMASK) > (768 << 20) ||
-           ABSDIFF(yuv1 & UMASK, yuv2 & UMASK) > ( 28 <<  10) ||
-           ABSDIFF(yuv1 & VMASK, yuv2 & VMASK) > ( 24 <<  10);
+static int yuv_diff(uint32_t c1, uint32_t c2)
+{
+    int y1 = (c1 >> 20) & 0xfff;
+    int y2 = (c2 >> 20) & 0xfff;
+    bool ydiff = std::abs(y1 - y2) > 768;
+    int u1 = int((c1 >> 10) & 0x3ff);
+    int u2 = int((c2 >> 10) & 0x3ff);
+    bool udiff = std::abs(u1 - u2) > 28;
+    int v1 = int(c1 & 0x3ff);
+    int v2 = int(c2 & 0x3ff);
+    bool vdiff = std::abs(v1 - v2) > 24;
+    return ydiff || udiff || vdiff;
 }
 
 /* (c1*w1 + c2*w2) >> s */
 static uint32_t interp_2px(uint32_t c1, unsigned w1, uint32_t c2, unsigned w2, unsigned s)
 {
-  (((c1 >> 20) & 0xfff) * w1 + ((c2 >> 20) & 0xfff) * w2) << (20 - s)
-    //return (((((c1 & 0xffc00) >> 10) * w1 + ((c2 & 0xffc00) >> 10) * w2) << (10 - s)) & 0xffc00) |
-    //       ((((c1 & 0xfff003ff) * w1 + (c2 & 0xfff003ff) * w2) >> s) & 0xfff003ff);
+    uint32_t y1 = (c1 >> 20) & 0xfff;
+    uint32_t y2 = (c2 >> 20) & 0xfff;
+    uint32_t y = ((y1 * w1 + y2 * w2) << (20 - s)) & YMASK;
+    int u1 = int((c1 >> 10) & 0x3ff) - 512;
+    int u2 = int((c2 >> 10) & 0x3ff) - 512;
+    uint32_t u = ((u1 * w1 + u2 * w2 + (512 << s)) << (10 - s)) & UMASK;
+    int v1 = int(c1 & 0x3ff) - 512;
+    int v2 = int(c2 & 0x3ff) - 512;
+    uint32_t v = ((v1 * w1 + v2 * w2 + (512 << s)) >> s) & VMASK;
+    return y | u | v;
 }
 
 /* (c1*w1 + c2*w2 + c3*w3) >> s */
 static uint32_t interp_3px(uint32_t c1, int w1, uint32_t c2, int w2, uint32_t c3, int w3, int s)
 {
-    return (((((c1 & 0xff00ff00) >> 8) * w1 + ((c2 & 0xff00ff00) >> 8) * w2 + ((c3 & 0xff00ff00) >> 8) * w3) << (8 - s)) & 0xff00ff00) |
-           (((((c1 & 0x00ff00ff)     ) * w1 + ((c2 & 0x00ff00ff)     ) * w2 + ((c3 & 0x00ff00ff)     ) * w3) >>      s ) & 0x00ff00ff);
+    uint y1 = (c1 >> 20) & 0xfff;
+    uint y2 = (c2 >> 20) & 0xfff;
+    uint y3 = (c3 >> 20) & 0xfff;
+    uint32_t y = ((y1 * w1 + y2 * w2 + y3 * w3) << (20 - s)) & YMASK;
+    int u1 = int((c1 >> 10) & 0x3ff) - 512;
+    int u2 = int((c2 >> 10) & 0x3ff) - 512;
+    int u3 = int((c3 >> 10) & 0x3ff) - 512;
+    uint32_t u = ((u1 * w1 + u2 * w2 + u3 * w3 + (512 << s)) << (10 - s)) & UMASK;
+    int v1 = int(c1 & 0x3ff) - 512;
+    int v2 = int(c2 & 0x3ff) - 512;
+    int v3 = int(c3 & 0x3ff) - 512;
+    uint32_t v = ((v1 * w1 + v2 * w2 + v3 * w3 + (512 << s)) >> s) & VMASK;
+    return y | u | v;
 }
 
 /* m is the mask of diff with the center pixel that matters in the pattern, and
