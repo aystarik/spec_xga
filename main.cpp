@@ -81,8 +81,9 @@ void initVideo()
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *window = SDL_CreateWindow("ZX Spectrum x4 - SDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, maxx*8*4, maxy*8*4, 0);
   renderer = SDL_CreateRenderer(window, -1, 0);
+  const uint8_t weight = 192;
   for (int i = 0; i < 2; ++i) {
-    uint8_t mult = 192 + i * (255 - 192);
+    uint8_t mult = weight + i * (255 - weight);
     for (int j = 0; j < 8; ++j) {
       uint8_t r = mult * colors[j][0];
       uint8_t g = mult * colors[j][1];
