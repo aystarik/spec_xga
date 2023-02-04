@@ -30,8 +30,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-const uint32_t YMASK = 0xfff00000u;
-const uint32_t UMASK = 0xffc00u;
+// 12Y + 10U + 10V = 32bit
+const uint32_t YMASK = 0xfffu << 20;
+const uint32_t UMASK = 0x3ffu << 10;
 const uint32_t VMASK = 0x3ffu;
 
 static int yuv_diff(uint32_t c1, uint32_t c2)
@@ -49,249 +50,271 @@ static int yuv_diff(uint32_t c1, uint32_t c2)
 }
 
 /* (c1*w1 + c2*w2) >> s */
-static uint32_t interp_2px(uint32_t c1, unsigned w1, uint32_t c2, unsigned w2, unsigned s)
+static uint32_t interp_2px(uint32_t c1, unsigned w1, uint32_t c2, unsigned w2)
 {
     uint32_t y1 = (c1 >> 20) & 0xfff;
     uint32_t y2 = (c2 >> 20) & 0xfff;
-    uint32_t y = ((y1 * w1 + y2 * w2) << (20 - s)) & YMASK;
+    uint32_t y = ((y1 * w1 + y2 * w2) << (20 - 3)) & YMASK;
     int u1 = int((c1 >> 10) & 0x3ff) - 512;
     int u2 = int((c2 >> 10) & 0x3ff) - 512;
-    uint32_t u = ((u1 * w1 + u2 * w2 + (512 << s)) << (10 - s)) & UMASK;
+    uint32_t u = ((u1 * w1 + u2 * w2 + (512 << 3)) << (10 - 3)) & UMASK;
     int v1 = int(c1 & 0x3ff) - 512;
     int v2 = int(c2 & 0x3ff) - 512;
-    uint32_t v = ((v1 * w1 + v2 * w2 + (512 << s)) >> s) & VMASK;
+    uint32_t v = ((v1 * w1 + v2 * w2 + (512 << 3)) >> 3) & VMASK;
     return y | u | v;
 }
 
 /* (c1*w1 + c2*w2 + c3*w3) >> s */
-static uint32_t interp_3px(uint32_t c1, int w1, uint32_t c2, int w2, uint32_t c3, int w3, int s)
+static uint32_t interp_3px(uint32_t c1, int w1, uint32_t c2, int w2, uint32_t c3, int w3)
 {
     uint y1 = (c1 >> 20) & 0xfff;
     uint y2 = (c2 >> 20) & 0xfff;
     uint y3 = (c3 >> 20) & 0xfff;
-    uint32_t y = ((y1 * w1 + y2 * w2 + y3 * w3) << (20 - s)) & YMASK;
+    uint32_t y = ((y1 * w1 + y2 * w2 + y3 * w3) << (20 - 3)) & YMASK;
     int u1 = int((c1 >> 10) & 0x3ff) - 512;
     int u2 = int((c2 >> 10) & 0x3ff) - 512;
     int u3 = int((c3 >> 10) & 0x3ff) - 512;
-    uint32_t u = ((u1 * w1 + u2 * w2 + u3 * w3 + (512 << s)) << (10 - s)) & UMASK;
+    uint32_t u = ((u1 * w1 + u2 * w2 + u3 * w3 + (512 << 3)) << (10 - 3)) & UMASK;
     int v1 = int(c1 & 0x3ff) - 512;
     int v2 = int(c2 & 0x3ff) - 512;
     int v3 = int(c3 & 0x3ff) - 512;
-    uint32_t v = ((v1 * w1 + v2 * w2 + v3 * w3 + (512 << s)) >> s) & VMASK;
+    uint32_t v = ((v1 * w1 + v2 * w2 + v3 * w3 + (512 << 3)) >> 3) & VMASK;
     return y | u | v;
 }
 
 /* m is the mask of diff with the center pixel that matters in the pattern, and
  * r is the expected result (bit set to 1 if there is difference with the
  * center, 0 otherwise) */
-#define P(m, r) ((k_shuffled & (m)) == (r))
-
-/* adjust 012345678 to 01235678: the mask doesn't contain the (null) diff
- * between the center/current pixel and itself */
-#define DROP4(z) ((z) > 4 ? (z)-1 : (z))
-
-/* shuffle the input mask: move bit n (4-adjusted) to position stored in p<n> */
-#define SHF(x, rot, n) (((x) >> ((rot) ? 7-DROP4(n) : DROP4(n)) & 1) << DROP4(p##n))
-
-/* used to check if there is YUV difference between 2 pixels */
-#define WDIFF(c1, c2) yuv_diff((c1), (c2))
-
-/* bootstrap template for every interpolation code. It defines the shuffled
- * masks and surrounding pixels. The rot flag is used to indicate if it's a
- * rotation; its basic effect is to shuffle k using p8..p0 instead of p0..p8 */
-#define INTERP_BOOTSTRAP(rot)                                           \
-    const int k_shuffled = SHF(k,rot,0) | SHF(k,rot,1) | SHF(k,rot,2)   \
-                         | SHF(k,rot,3) |       0      | SHF(k,rot,5)   \
-                         | SHF(k,rot,6) | SHF(k,rot,7) | SHF(k,rot,8);  \
-                                                                        \
-    const uint32_t w0 = w[p0], w1 = w[p1],                              \
-                   w3 = w[p3], w4 = w[p4], w5 = w[p5],                  \
-                               w7 = w[p7]
+bool P(const uint8_t pattern, const uint8_t mask, const uint8_t result) {return (pattern & mask) == result;}
 
 /* Assuming p0..p8 is mapped to pixels 0..8, this function interpolates the
  * top-left block of 2x2 pixels in the total of the 4x4 pixels (or 4 blocks) to
  * interpolates. The function is also used for the 3 other blocks of 2x2
  * pixels. */
-static void hq4x_interp_2x2(uint32_t *dst, int dst_linesize,
-                            int k, const uint32_t *w,
-                                             int pos00, int pos01,
-                                             int pos10, int pos11,
-                                             int p0, int p1, int p2,
-                                             int p3, int p4, int p5,
-                                             int p6, int p7, int p8)
+static uint32_t hq4x_interp_2x2_00(const uint8_t pattern, const uint32_t *w)
 {
-    INTERP_BOOTSTRAP(0);
-
-    uint32_t *dst00 = &dst[dst_linesize*(pos00>>1) + (pos00&1)];
-    uint32_t *dst01 = &dst[dst_linesize*(pos01>>1) + (pos01&1)];
-    uint32_t *dst10 = &dst[dst_linesize*(pos10>>1) + (pos10&1)];
-    uint32_t *dst11 = &dst[dst_linesize*(pos11>>1) + (pos11&1)];
-
-    const int cond00 = (P(0xbf,0x37) || P(0xdb,0x13)) && WDIFF(w1, w5);
-    const int cond01 = (P(0xdb,0x49) || P(0xef,0x6d)) && WDIFF(w7, w3);
-    const int cond02 = (P(0x6f,0x2a) || P(0x5b,0x0a) || P(0xbf,0x3a) ||
-                        P(0xdf,0x5a) || P(0x9f,0x8a) || P(0xcf,0x8a) ||
-                        P(0xef,0x4e) || P(0x3f,0x0e) || P(0xfb,0x5a) ||
-                        P(0xbb,0x8a) || P(0x7f,0x5a) || P(0xaf,0x8a) ||
-                        P(0xeb,0x8a)) && WDIFF(w3, w1);
-    const int cond03 = P(0xdb,0x49) || P(0xef,0x6d);
-    const int cond04 = P(0xbf,0x37) || P(0xdb,0x13);
-    const int cond05 = P(0x1b,0x03) || P(0x4f,0x43) || P(0x8b,0x83) ||
-                       P(0x6b,0x43);
-    const int cond06 = P(0x4b,0x09) || P(0x8b,0x89) || P(0x1f,0x19) ||
-                       P(0x3b,0x19);
-    const int cond07 = P(0x0b,0x08) || P(0xf9,0x68) || P(0xf3,0x62) ||
-                       P(0x6d,0x6c) || P(0x67,0x66) || P(0x3d,0x3c) ||
-                       P(0x37,0x36) || P(0xf9,0xf8) || P(0xdd,0xdc) ||
-                       P(0xf3,0xf2) || P(0xd7,0xd6) || P(0xdd,0x1c) ||
-                       P(0xd7,0x16) || P(0x0b,0x02);
-    const int cond08 = (P(0x0f,0x0b) || P(0x2b,0x0b) || P(0xfe,0x4a) ||
-                        P(0xfe,0x1a)) && WDIFF(w3, w1);
-    const int cond09 = P(0x2f,0x2f);
-    const int cond10 = P(0x0a,0x00);
-    const int cond11 = P(0x0b,0x09);
-    const int cond12 = P(0x7e,0x2a) || P(0xef,0xab);
-    const int cond13 = P(0xbf,0x8f) || P(0x7e,0x0e);
-    const int cond14 = P(0x4f,0x4b) || P(0x9f,0x1b) || P(0x2f,0x0b) ||
-                       P(0xbe,0x0a) || P(0xee,0x0a) || P(0x7e,0x0a) ||
-                       P(0xeb,0x4b) || P(0x3b,0x1b);
-    const int cond15 = P(0x0b,0x03);
+    const bool diff15 = yuv_diff(w[1], w[5]);
+    const bool diff73 = yuv_diff(w[7], w[3]);
+    const bool diff31 = yuv_diff(w[3], w[1]);
+    const bool cond00 = (P(pattern, 0b10111111,0b00110111) || P(pattern, 0b11011011,0b00010011)) && diff15;
+    const bool cond01 = (P(pattern, 0b11011011,0b01001001) || P(pattern, 0b11101111,0b01101101)) && diff73;
+    const bool cond02 = (P(pattern, 0b01101111,0b00101010) || P(pattern, 0b1011011,0b1010) || P(pattern, 0b10111111,0b111010) || P(pattern, 0b11011111,0b1011010) ||
+                         P(pattern, 0b10011111,0b10001010) || P(pattern, 0b11001111,0b10001010) ||
+                        P(pattern, 0b11101111,0b1001110) || P(pattern, 0b111111,0b1110) || P(pattern, 0b11111011,0b1011010) || P(pattern, 0b10111011,0b10001010) ||
+                         P(pattern, 0b1111111,0b1011010) || P(pattern, 0b10101111,0b10001010) ||
+                        P(pattern, 0b11101011,0b10001010)) && diff31;
+    const bool cond03 = P(pattern, 0xdb,0x49) || P(pattern, 0xef,0x6d);
+    const bool cond04 = P(pattern, 0xbf,0x37) || P(pattern, 0xdb,0x13);
+    const bool cond05 = P(pattern, 0x1b,0x03) || P(pattern, 0x4f,0x43) || P(pattern, 0x8b,0x83) || P(pattern, 0x6b,0x43);
+    const bool cond06 = P(pattern, 0x4b,0x09) || P(pattern, 0x8b,0x89) || P(pattern, 0x1f,0x19) || P(pattern, 0x3b,0x19);
+    const bool cond07 = P(pattern, 0x0b,0x08) || P(pattern, 0xf9,0x68) || P(pattern, 0xf3,0x62) || P(pattern, 0x6d,0x6c) || P(pattern, 0x67,0x66) || P(pattern, 0x3d,0x3c) ||
+                       P(pattern, 0x37,0x36) || P(pattern, 0xf9,0xf8) || P(pattern, 0xdd,0xdc) || P(pattern, 0xf3,0xf2) || P(pattern, 0xd7,0xd6) || P(pattern, 0xdd,0x1c) || P(pattern, 0xd7,0x16) || P(pattern, 0x0b,0x02);
 
     if (cond00)
-        *dst00 = interp_2px(w4, 5, w3, 3, 3);
-    else if (cond01)
-        *dst00 = interp_2px(w4, 5, w1, 3, 3);
-    else if ((P(0x0b,0x0b) || P(0xfe,0x4a) || P(0xfe,0x1a)) && WDIFF(w3, w1))
-        *dst00 = w4;
-    else if (cond02)
-        *dst00 = interp_2px(w4, 5, w0, 3, 3);
-    else if (cond03)
-        *dst00 = interp_2px(w4, 3, w3, 1, 2);
-    else if (cond04)
-        *dst00 = interp_2px(w4, 3, w1, 1, 2);
-    else if (cond05)
-        *dst00 = interp_2px(w4, 5, w3, 3, 3);
-    else if (cond06)
-        *dst00 = interp_2px(w4, 5, w1, 3, 3);
-    else if (P(0x0f,0x0b) || P(0x5e,0x0a) || P(0x2b,0x0b) || P(0xbe,0x0a) ||
-             P(0x7a,0x0a) || P(0xee,0x0a))
-        *dst00 = interp_2px(w1, 1, w3, 1, 1);
-    else if (cond07)
-        *dst00 = interp_2px(w4, 5, w0, 3, 3);
-    else
-        *dst00 = interp_3px(w4, 2, w1, 1, w3, 1, 2);
+        return interp_2px(w[4], 5, w[3], 3);
+    if (cond01)
+        return interp_2px(w[4], 5, w[1], 3);
+    if ((P(pattern, 0x0b,0x0b) || P(pattern, 0xfe,0x4a) || P(pattern, 0xfe,0x1a)) && diff31)
+        return w[4];
+    if (cond02)
+        return interp_2px(w[4], 5, w[0], 3);
+    if (cond03)
+        return interp_2px(w[4], 6, w[3], 2);
+    if (cond04)
+        return interp_2px(w[4], 6, w[1], 2);
+    if (cond05)
+        return interp_2px(w[4], 5, w[3], 3);
+    if (cond06)
+        return interp_2px(w[4], 5, w[1], 3);
+    if (P(pattern, 0x0f,0x0b) || P(pattern, 0x5e,0x0a) || P(pattern, 0x2b,0x0b) || P(pattern, 0xbe,0x0a) || P(pattern, 0x7a,0x0a) || P(pattern, 0xee,0x0a))
+        return interp_2px(w[1], 4, w[3], 4);
+    if (cond07)
+        return interp_2px(w[4], 5, w[0], 3);
+    return interp_3px(w[4], 4, w[1], 2, w[3], 2);
+}
+
+static uint32_t hq4x_interp_2x2_01(const uint8_t pattern, const uint32_t *w)
+{
+    const bool diff15 = yuv_diff(w[1], w[5]);
+    const bool diff31 = yuv_diff(w[3], w[1]);
+    const bool cond00 = (P(pattern, 0b10111111,0b00110111) || P(pattern, 0b11011011,0b00010011)) && diff15;
+    const bool cond02 = (P(pattern, 0b01101111,0b00101010) || P(pattern, 0b1011011,0b1010) || P(pattern, 0b10111111,0b111010) || P(pattern, 0b11011111,0b1011010) ||
+                         P(pattern, 0b10011111,0b10001010) || P(pattern, 0b11001111,0b10001010) ||
+                        P(pattern, 0b11101111,0b1001110) || P(pattern, 0b111111,0b1110) || P(pattern, 0b11111011,0b1011010) || P(pattern, 0b10111011,0b10001010) ||
+                         P(pattern, 0b1111111,0b1011010) || P(pattern, 0b10101111,0b10001010) ||
+                        P(pattern, 0b11101011,0b10001010)) && diff31;
+    const bool cond04 = P(pattern, 0xbf,0x37) || P(pattern, 0xdb,0x13);
+    const bool cond05 = P(pattern, 0x1b,0x03) || P(pattern, 0x4f,0x43) || P(pattern, 0x8b,0x83) || P(pattern, 0x6b,0x43);
+    const bool cond08 = (P(pattern, 0x0f,0x0b) || P(pattern, 0x2b,0x0b) || P(pattern, 0xfe,0x4a) || P(pattern, 0xfe,0x1a)) && diff31;
+    const bool cond09 = P(pattern, 0x2f,0x2f);
+    const bool cond10 = P(pattern, 0x0a,0x00);
+    const bool cond11 = P(pattern, 0x0b,0x09);
+    const bool cond12 = P(pattern, 0x7e,0x2a) || P(pattern, 0xef,0xab);
+    const bool cond13 = P(pattern, 0xbf,0x8f) || P(pattern, 0x7e,0x0e);
+    const bool cond14 = P(pattern, 0x4f,0x4b) || P(pattern, 0x9f,0x1b) || P(pattern, 0x2f,0x0b) || P(pattern, 0xbe,0x0a) || P(pattern, 0xee,0x0a) ||
+            P(pattern, 0x7e,0x0a) || P(pattern, 0xeb,0x4b) || P(pattern, 0x3b,0x1b);
 
     if (cond00)
-        *dst01 = interp_2px(w4, 7, w3, 1, 3);
-    else if (cond08)
-        *dst01 = w4;
-    else if (cond02)
-        *dst01 = interp_2px(w4, 3, w0, 1, 2);
-    else if (cond09)
-        *dst01 = w4;
-    else if (cond10)
-        *dst01 = interp_3px(w4, 5, w1, 2, w3, 1, 3);
-    else if (P(0x0b,0x08))
-        *dst01 = interp_3px(w4, 5, w1, 2, w0, 1, 3);
-    else if (cond11)
-        *dst01 = interp_2px(w4, 5, w1, 3, 3);
-    else if (cond04)
-        *dst01 = interp_2px(w1, 3, w4, 1, 2);
-    else if (cond12)
-        *dst01 = interp_3px(w1, 2, w4, 1, w3, 1, 2);
-    else if (cond13)
-        *dst01 = interp_2px(w1, 5, w3, 3, 3);
-    else if (cond05)
-        *dst01 = interp_2px(w4, 7, w3, 1, 3);
-    else if (P(0xf3,0x62) || P(0x67,0x66) || P(0x37,0x36) || P(0xf3,0xf2) ||
-             P(0xd7,0xd6) || P(0xd7,0x16) || P(0x0b,0x02))
-        *dst01 = interp_2px(w4, 3, w0, 1, 2);
-    else if (cond14)
-        *dst01 = interp_2px(w1, 1, w4, 1, 1);
-    else
-        *dst01 = interp_2px(w4, 3, w1, 1, 2);
+        return interp_2px(w[4], 7, w[3], 1);
+    if (cond08)
+        return w[4];
+    if (cond02)
+        return interp_2px(w[4], 6, w[0], 2);
+    if (cond09)
+        return w[4];
+    if (cond10)
+        return interp_3px(w[4], 5, w[1], 2, w[3], 1);
+    if (P(pattern, 0x0b,0x08))
+        return interp_3px(w[4], 5, w[1], 2, w[0], 1);
+    if (cond11)
+        return interp_2px(w[4], 5, w[1], 3);
+    if (cond04)
+        return interp_2px(w[1], 6, w[4], 2);
+    if (cond12)
+        return interp_3px(w[1], 4, w[4], 2, w[3], 2);
+    if (cond13)
+        return interp_2px(w[1], 5, w[3], 3);
+    if (cond05)
+        return interp_2px(w[4], 7, w[3], 1);
+    if (P(pattern, 0xf3,0x62) || P(pattern, 0x67,0x66) || P(pattern, 0x37,0x36) || P(pattern, 0xf3,0xf2) || P(pattern, 0xd7,0xd6) || P(pattern, 0xd7,0x16) || P(pattern, 0x0b,0x02))
+        return interp_2px(w[4], 6, w[0], 2);
+    if (cond14)
+        return interp_2px(w[1], 4, w[4], 4);
+    return interp_2px(w[4], 6, w[1], 2);
+}
+
+static uint32_t hq4x_interp_2x2_10(const uint8_t pattern, const uint32_t *w)
+{
+    const bool diff73 = yuv_diff(w[7], w[3]);
+    const bool diff31 = yuv_diff(w[3], w[1]);
+    const bool cond01 = (P(pattern, 0b11011011,0b01001001) || P(pattern, 0b11101111,0b01101101)) && diff73;
+    const bool cond02 = (P(pattern, 0b01101111,0b00101010) || P(pattern, 0b1011011,0b1010) || P(pattern, 0b10111111,0b111010) || P(pattern, 0b11011111,0b1011010) ||
+                         P(pattern, 0b10011111,0b10001010) || P(pattern, 0b11001111,0b10001010) ||
+                        P(pattern, 0b11101111,0b1001110) || P(pattern, 0b111111,0b1110) || P(pattern, 0b11111011,0b1011010) || P(pattern, 0b10111011,0b10001010) ||
+                         P(pattern, 0b1111111,0b1011010) || P(pattern, 0b10101111,0b10001010) ||
+                        P(pattern, 0b11101011,0b10001010)) && diff31;
+    const bool cond03 = P(pattern, 0xdb,0x49) || P(pattern, 0xef,0x6d);
+    const bool cond06 = P(pattern, 0x4b,0x09) || P(pattern, 0x8b,0x89) || P(pattern, 0x1f,0x19) || P(pattern, 0x3b,0x19);
+    const bool cond08 = (P(pattern, 0x0f,0x0b) || P(pattern, 0x2b,0x0b) || P(pattern, 0xfe,0x4a) || P(pattern, 0xfe,0x1a)) && diff31;
+    const bool cond09 = P(pattern, 0x2f,0x2f);
+    const bool cond10 = P(pattern, 0x0a,0x00);
+    const bool cond12 = P(pattern, 0x7e,0x2a) || P(pattern, 0xef,0xab);
+    const bool cond13 = P(pattern, 0xbf,0x8f) || P(pattern, 0x7e,0x0e);
+    const bool cond14 = P(pattern, 0x4f,0x4b) || P(pattern, 0x9f,0x1b) || P(pattern, 0x2f,0x0b) || P(pattern, 0xbe,0x0a) || P(pattern, 0xee,0x0a) ||
+            P(pattern, 0x7e,0x0a) || P(pattern, 0xeb,0x4b) || P(pattern, 0x3b,0x1b);
+    const bool cond15 = P(pattern, 0x0b,0x03);
 
     if (cond01)
-        *dst10 = interp_2px(w4, 7, w1, 1, 3);
-    else if (cond08)
-        *dst10 = w4;
-    else if (cond02)
-        *dst10 = interp_2px(w4, 3, w0, 1, 2);
-    else if (cond09)
-        *dst10 = w4;
-    else if (cond10)
-        *dst10 = interp_3px(w4, 5, w3, 2, w1, 1, 3);
-    else if (P(0x0b,0x02))
-        *dst10 = interp_3px(w4, 5, w3, 2, w0, 1, 3);
-    else if (cond15)
-        *dst10 = interp_2px(w4, 5, w3, 3, 3);
-    else if (cond03)
-        *dst10 = interp_2px(w3, 3, w4, 1, 2);
-    else if (cond13)
-        *dst10 = interp_3px(w3, 2, w4, 1, w1, 1, 2);
-    else if (cond12)
-        *dst10 = interp_2px(w3, 5, w1, 3, 3);
-    else if (cond06)
-        *dst10 = interp_2px(w4, 7, w1, 1, 3);
-    else if (P(0x0b,0x08) || P(0xf9,0x68) || P(0x6d,0x6c) || P(0x3d,0x3c) ||
-             P(0xf9,0xf8) || P(0xdd,0xdc) || P(0xdd,0x1c))
-        *dst10 = interp_2px(w4, 3, w0, 1, 2);
-    else if (cond14)
-        *dst10 = interp_2px(w3, 1, w4, 1, 1);
-    else
-        *dst10 = interp_2px(w4, 3, w3, 1, 2);
+        return interp_2px(w[4], 7, w[1], 1);
+    if (cond08)
+        return w[4];
+    if (cond02)
+        return interp_2px(w[4], 6, w[0], 2);
+    if (cond09)
+        return w[4];
+    if (cond10)
+        return interp_3px(w[4], 5, w[3], 2, w[1], 1);
+    if (P(pattern, 0x0b,0x02))
+        return interp_3px(w[4], 5, w[3], 2, w[0], 1);
+    if (cond15)
+        return interp_2px(w[4], 5, w[3], 3);
+    if (cond03)
+        return interp_2px(w[3], 6, w[4], 2);
+    if (cond13)
+        return interp_3px(w[3], 4, w[4], 2, w[1], 2);
+    if (cond12)
+        return interp_2px(w[3], 5, w[1], 3);
+    if (cond06)
+        return interp_2px(w[4], 7, w[1], 1);
+    if (P(pattern, 0x0b,0x08) || P(pattern, 0xf9,0x68) || P(pattern, 0x6d,0x6c) || P(pattern, 0x3d,0x3c) || P(pattern, 0xf9,0xf8) || P(pattern, 0xdd,0xdc) || P(pattern, 0xdd,0x1c))
+        return interp_2px(w[4], 6, w[0], 2);
+    if (cond14)
+        return interp_2px(w[3], 4, w[4], 4);
+    return interp_2px(w[4], 6, w[3], 2);
+}
 
-    if ((P(0x7f,0x2b) || P(0xef,0xab) || P(0xbf,0x8f) || P(0x7f,0x0f)) &&
-         WDIFF(w3, w1))
-        *dst11 = w4;
-    else if (cond02)
-        *dst11 = interp_2px(w4, 7, w0, 1, 3);
-    else if (cond15)
-        *dst11 = interp_2px(w4, 7, w3, 1, 3);
-    else if (cond11)
-        *dst11 = interp_2px(w4, 7, w1, 1, 3);
-    else if (P(0x0a,0x00) || P(0x7e,0x2a) || P(0xef,0xab) || P(0xbf,0x8f) ||
-             P(0x7e,0x0e))
-        *dst11 = interp_3px(w4, 6, w3, 1, w1, 1, 3);
-    else if (cond07)
-        *dst11 = interp_2px(w4, 7, w0, 1, 3);
-    else
-        *dst11 = w4;
+static uint32_t hq4x_interp_2x2_11(const uint8_t pattern, const uint32_t *w)
+{
+    bool diff31 = yuv_diff(w[3], w[1]);
+    const bool cond02 = (P(pattern, 0b01101111,0b00101010) || P(pattern, 0b1011011,0b1010) || P(pattern, 0b10111111,0b111010) || P(pattern, 0b11011111,0b1011010) ||
+                         P(pattern, 0b10011111,0b10001010) || P(pattern, 0b11001111,0b10001010) ||
+                        P(pattern, 0b11101111,0b1001110) || P(pattern, 0b111111,0b1110) || P(pattern, 0b11111011,0b1011010) || P(pattern, 0b10111011,0b10001010) ||
+                         P(pattern, 0b1111111,0b1011010) || P(pattern, 0b10101111,0b10001010) ||
+                        P(pattern, 0b11101011,0b10001010)) && diff31;
+    const bool cond07 = P(pattern, 0x0b,0x08) || P(pattern, 0xf9,0x68) || P(pattern, 0xf3,0x62) || P(pattern, 0x6d,0x6c) || P(pattern, 0x67,0x66) || P(pattern, 0x3d,0x3c) ||
+                       P(pattern, 0x37,0x36) || P(pattern, 0xf9,0xf8) || P(pattern, 0xdd,0xdc) || P(pattern, 0xf3,0xf2) || P(pattern, 0xd7,0xd6) || P(pattern, 0xdd,0x1c) ||
+            P(pattern, 0xd7,0x16) || P(pattern, 0x0b,0x02);
+    const bool cond11 = P(pattern, 0x0b,0x09);
+    const bool cond15 = P(pattern, 0x0b,0x03);
+
+
+    if ((P(pattern, 0x7f,0x2b) || P(pattern, 0xef,0xab) || P(pattern, 0xbf,0x8f) || P(pattern, 0x7f,0x0f)) && diff31)
+        return w[4];
+    if (cond02)
+        return interp_2px(w[4], 7, w[0], 1);
+    if (cond15)
+        return interp_2px(w[4], 7, w[3], 1);
+    if (cond11)
+        return interp_2px(w[4], 7, w[1], 1);
+    if (P(pattern, 0x0a,0x00) || P(pattern, 0x7e,0x2a) || P(pattern, 0xef,0xab) || P(pattern, 0xbf,0x8f) || P(pattern, 0x7e,0x0e))
+        return interp_3px(w[4], 6, w[3], 1, w[1], 1);
+    if (cond07)
+        return interp_2px(w[4], 7, w[0], 1);
+    return w[4];
 }
 
 void hqx_filter(const uint32_t *src, uint32_t *dst, const int width, const int height)
 {
     for (int y = 0; y < height; ++y) {
-        const uint32_t *src32 = src;
-        uint32_t *dst32 = dst;
         const int prevline = y > 0          ? -width : 0;
         const int nextline = y < height - 1 ?  width : 0;
         for (int x = 0; x < width; ++x) {
             const int prevcol = x > 0        ? -1 : 0;
             const int nextcol = x < width -1 ?  1 : 0;
             const uint32_t w[3*3] = {
-                src32[prevcol + prevline], src32[prevline], src32[prevline + nextcol],
-                src32[prevcol           ], src32[       0], src32[           nextcol],
-                src32[prevcol + nextline], src32[nextline], src32[nextline + nextcol]
+                src[prevcol + prevline], src[prevline], src[prevline + nextcol],
+                src[prevcol           ], src[       0], src[           nextcol],
+                src[prevcol + nextline], src[nextline], src[nextline + nextcol]
             };
-            const uint32_t yuv1 = w[4];
-            const int pattern = (w[4] != w[0] ? (yuv_diff(yuv1, w[0])) : 0)
-                              | (w[4] != w[1] ? (yuv_diff(yuv1, w[1])) : 0) << 1
-                              | (w[4] != w[2] ? (yuv_diff(yuv1, w[2])) : 0) << 2
-                              | (w[4] != w[3] ? (yuv_diff(yuv1, w[3])) : 0) << 3
-                              | (w[4] != w[5] ? (yuv_diff(yuv1, w[5])) : 0) << 4
-                              | (w[4] != w[6] ? (yuv_diff(yuv1, w[6])) : 0) << 5
-                              | (w[4] != w[7] ? (yuv_diff(yuv1, w[7])) : 0) << 6
-                              | (w[4] != w[8] ? (yuv_diff(yuv1, w[8])) : 0) << 7;
+            const bool diff0 = yuv_diff(w[4], w[0]);
+            const bool diff1 = yuv_diff(w[4], w[1]);
+            const bool diff2 = yuv_diff(w[4], w[2]);
+            const bool diff3 = yuv_diff(w[4], w[3]);
+            const bool diff5 = yuv_diff(w[4], w[5]);
+            const bool diff6 = yuv_diff(w[4], w[6]);
+            const bool diff7 = yuv_diff(w[4], w[7]);
+            const bool diff8 = yuv_diff(w[4], w[8]);
+            uint8_t pattern = diff0 | diff1 << 1| diff2 << 2| diff3 << 3| diff5 << 4| diff6 << 5| diff7 << 6| diff8 << 7;
+            unsigned dst_linesize = 4 * width;
+            dst[0] = hq4x_interp_2x2_00(pattern, w); // 00 01 10 11
+            dst[1] = hq4x_interp_2x2_01(pattern, w); // 00 01 10 11
+            dst[dst_linesize] = hq4x_interp_2x2_10(pattern, w); // 00 01 10 11
+            dst[dst_linesize + 1] = hq4x_interp_2x2_11(pattern, w); // 00 01 10 11
+            //2,1,0,5,3,8,7,6
+            pattern = diff2 | diff1 << 1 | diff0 << 2 | diff5 << 3 | diff3 << 4 | diff8 << 5 | diff7 << 6 | diff6 << 7;
 
-            hq4x_interp_2x2(dst32,                     4 * width, pattern, w, 0,1,2,3, 0,1,2,3,4,5,6,7,8); // 00 01 10 11
-            hq4x_interp_2x2(dst32 + 2,                 4 * width, pattern, w, 1,0,3,2, 2,1,0,5,4,3,8,7,6); // 02 03 12 13 (vert mirrored)
-            hq4x_interp_2x2(dst32 + 2 * 4 * width,     4 * width, pattern, w, 2,3,0,1, 6,7,8,3,4,5,0,1,2); // 20 21 30 31 (horiz mirrored)
-            hq4x_interp_2x2(dst32 + 2 * 4 * width + 2, 4 * width, pattern, w, 3,2,1,0, 8,7,6,5,4,3,2,1,0); // 22 23 32 33 (center mirrored)
-            ++src32;
-            dst32 += 4;
+            const uint32_t W1[] = {w[2], w[1], 0, w[5], w[4], w[3], 0, w[7]};
+            dst[3] = hq4x_interp_2x2_00(pattern, W1); // 02 03 12 13 (vert mirrored)
+            dst[2] = hq4x_interp_2x2_01(pattern, W1); // 02 03 12 13 (vert mirrored)
+            dst[dst_linesize + 3] = hq4x_interp_2x2_10(pattern, W1); // 02 03 12 13 (vert mirrored)
+            dst[dst_linesize + 2] = hq4x_interp_2x2_11(pattern, W1); // 02 03 12 13 (vert mirrored)
+            //6,7,8,3,5,0,1,2
+            pattern = diff6 | diff7 << 1 | diff8 << 2 | diff3 << 3| diff5 << 4|diff0 << 5| diff1 << 6| diff2 << 7;
+            const uint32_t W2[] = {w[6], w[7], 0, w[3], w[4], w[5], 0, w[1]};
+            dst[3 * dst_linesize] = hq4x_interp_2x2_00(pattern, W2); // 20 21 30 31 (horiz mirrored)
+            dst[3 * dst_linesize + 1] = hq4x_interp_2x2_01(pattern, W2); // 20 21 30 31 (horiz mirrored)
+            dst[2 * dst_linesize] = hq4x_interp_2x2_10(pattern, W2); // 20 21 30 31 (horiz mirrored)
+            dst[2 * dst_linesize + 1] = hq4x_interp_2x2_11(pattern, W2); // 20 21 30 31 (horiz mirrored)
+            //8,7,6,5,3,2,1,0
+            pattern = diff8 | diff7 << 1| diff6 << 2| diff5 << 3| diff3 << 4| diff2 << 5| diff1 << 6| diff0 << 7;
+            const uint32_t W3[] = {w[8], w[7], 0, w[5], w[4], w[3], 0, w[1]};
+            dst[3 * dst_linesize + 3] = hq4x_interp_2x2_00(pattern, W3); // 22 23 32 33 (center mirrored)
+            dst[3 * dst_linesize + 2] = hq4x_interp_2x2_01(pattern, W3); // 22 23 32 33 (center mirrored)
+            dst[2 * dst_linesize + 3] = hq4x_interp_2x2_10(pattern, W3); // 22 23 32 33 (center mirrored)
+            dst[2 * dst_linesize + 2] = hq4x_interp_2x2_11(pattern, W3); // 22 23 32 33 (center mirrored)
+            ++src;
+            dst += 4;
         }
-        src += width;
-        dst += width * 4 * 4;
+        dst += width * 4 * 3;
     }
 }
