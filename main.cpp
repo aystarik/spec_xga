@@ -10,8 +10,8 @@ const unsigned maxx = 32;
 const unsigned maxy = 24;
 #define USE_HQ4  1
 struct VRAM {
-  uint8_t pix[maxx * maxy * 8];
-  uint8_t attr[maxx * maxy];
+  uint8_t pix[maxx * maxy * 8];//6144
+  uint8_t attr[maxx * maxy];//768
   uint32_t *sinc_fb;
   uint32_t *sinc4_fb;
   VRAM() {
@@ -62,7 +62,7 @@ static uint32_t rgb2yuv(const uint8_t r, const uint8_t g, const uint8_t b) {
     unsigned y = round(4.784*r + 9.392*g + 1.824*b);
     int u = round(-0.67494*r - 1.32505*g + 2.0*b)+512;
     int v = round(2.0*r - 1.67476*g - 0.32526*b)+512;
-  return (y & 0xfff) << 20 | (u & 0x3ff) << 10 | (v & 0x3ff);
+    return (y & 0xfff) << 20 | (u & 0x3ff) << 10 | (v & 0x3ff);
 }
 
 static void yuv2rgb(const uint32_t yuv, int &r, int &g, int &b) {
@@ -81,69 +81,117 @@ void initVideo()
   SDL_Init(SDL_INIT_VIDEO);
   SDL_Window *window = SDL_CreateWindow("ZX Spectrum x4 - SDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, maxx*8*4, maxy*8*4, 0);
   renderer = SDL_CreateRenderer(window, -1, 0);
-  const uint8_t weight = 192;
-  for (int i = 0; i < 2; ++i) {
-    uint8_t mult = weight + i * (255 - weight);
-    for (int j = 0; j < 8; ++j) {
+  uint8_t mult = 192;
+  for (unsigned i = 0; i < 2; ++i) {
+    for (unsigned j = 0; j < 8; ++j) {
       uint8_t r = mult * colors[j][0];
       uint8_t g = mult * colors[j][1];
       uint8_t b = mult * colors[j][2];
       rgb_colors[i * 8 + j] = r << 16 | g << 8 | b;
-      uint32_t yuv = rgb2yuv(r, g, b);
-      yuv_colors[i * 8 + j] = yuv;
+      yuv_colors[i * 8 + j] = rgb2yuv(r, g, b);
     }
+    mult = 255;
   }
 }
 
 extern void hqx_filter(const uint32_t *src32, uint32_t *dst32, const int width, const int height);
 
-void drawScreen() {
-  bool use_hq4 = false;
-  if (compare)
-    use_hq4 = true;
-  for (unsigned y = 0; y < maxy; ++y) {
-    for (unsigned x = 0; x < maxx; ++x) {
-      uint8_t attr = vram.attr[y * maxx + x];
-      uint8_t fg = 0b111 & attr;
-      attr >>= 3;
-      uint8_t bk = 0b111 & attr;
-      attr >>= 3;
-      uint8_t bright = 1 & attr;
-      //attr >>= 1;
-      //uint8_t flash = 1 & attr;
-      int off0 = (y & 0b11000) << 8 | (y & 0b111) << 5 | x;
-      for (unsigned iy = 0; iy < 8; ++iy) {
-        uint8_t pix8 = vram.pix[off0 | iy << 8];
-        for (unsigned ix = 0; ix < 8; ++ix, pix8 <<= 1) {
-          uint8_t pix = !!(0x80 & pix8);
-          unsigned ci = (bright << 3)|(pix ? fg : bk);
-          if (use_hq4) {
-            int xo = (x * 8 + ix);
-            int yo = (y * 8 + iy);
-            vram.sinc_fb[yo * 256 + xo] = yuv_colors[ci];
-          } else {
-            SDL_SetRenderDrawColor(renderer, rgb_colors[ci] >> 16, rgb_colors[ci] >> 8, rgb_colors[ci], 255);
-            int xo = (x * 8 + ix) * 4;
-            int yo = (y * 8 + iy) * 4;
-            for (unsigned i = 0; i < 4; ++i)
-              for (unsigned j = 0; j < 4; ++j)
-                SDL_RenderDrawPoint(renderer, xo + i, yo + j);
-          }
+uint32_t get_sinclair_color(unsigned x, unsigned y) {
+    unsigned yb = y >> 3, xb = x >> 3, xbit = x & 0b111, ybit = y &0b111;
+    uint8_t attr = vram.attr[yb * maxx + xb];
+    uint8_t fg = 0b111 & attr;
+    uint8_t bg = 0b111 & (attr >> 3);
+    uint8_t bright = (attr >> 6) & 1;
+    unsigned off0 = (yb & 0b11000 | ybit) << 8 | (yb & 0b111) << 5 | xb;
+    uint8_t pix8 = vram.pix[off0];
+    return (bright << 3) | ((pix8 & (1 << (7 - xbit)))?fg:bg);
+    //return yuv_colors[ci];
+}
+
+void calc_area() {
+    uint32_t w[9];
+    for (unsigned y = 0; y < 192; ++y) {
+        unsigned yprev = (y > 0) ? y - 1 : y;
+        unsigned ynext = (y < 192 - 1)? y + 1:y;
+        for (unsigned x = 0; x < 256; ++x) {
+            unsigned xprev = (x > 0) ? x - 1 : x;
+            unsigned xnext = (x < 256 - 1) ? x + 1: x;
+            w[0] = get_sinclair_color(xprev, yprev);
+            w[1] = get_sinclair_color(x, yprev);
+            w[2] = get_sinclair_color(xnext, yprev);
+            w[3] = get_sinclair_color(xprev, y);
+            w[4] = get_sinclair_color(x, y);
+            w[5] = get_sinclair_color(xnext, y);
+            w[6] = get_sinclair_color(xprev, ynext);
+            w[7] = get_sinclair_color(x, ynext);
+            w[8] = get_sinclair_color(xnext, ynext);
         }
-      }
     }
-  }
-  if (use_hq4) {
-    hqx_filter(vram.sinc_fb, vram.sinc4_fb, 256, 192);
-    for (int y = 0; y < 768; ++y) {
-      for (int x = 0; x < 1024; ++x) {
-        int r, g, b;
-        yuv2rgb(vram.sinc4_fb[y*1024+x], r, g, b);
-        SDL_SetRenderDrawColor(renderer, r, g, b, 255);
-        SDL_RenderDrawPoint(renderer, x, y);
-      }
+}
+void drawScreen() {
+    bool use_hq4 = false;
+    if (compare)
+        use_hq4 = true;
+#if 1
+    for (unsigned y = 0; y < 192; ++y) {
+        for (unsigned x = 0; x < 256; ++x) {
+            if (use_hq4)
+                vram.sinc_fb[y * 256 + x] = yuv_colors[get_sinclair_color(x, y)];
+            else {
+                uint8_t ci = get_sinclair_color(x, y);
+                SDL_SetRenderDrawColor(renderer, rgb_colors[ci] >> 16, rgb_colors[ci] >> 8, rgb_colors[ci], 255);
+                int xo = x * 4;
+                int yo = y * 4;
+                for (unsigned i = 0; i < 4; ++i)
+                    for (unsigned j = 0; j < 4; ++j)
+                        SDL_RenderDrawPoint(renderer, xo + i, yo + j);
+            }
+        }
     }
-  }
+#else
+    for (unsigned y = 0; y < maxy; ++y) {
+        for (unsigned x = 0; x < maxx; ++x) {
+            uint8_t attr = vram.attr[y * maxx + x];
+            uint8_t fg = 0b111 & attr;
+            uint8_t bk = 0b111 & (attr >> 3);
+            uint8_t bright = 1 & (attr >> 6);
+            //attr >>= 1;
+            //uint8_t flash = 1 & attr;
+            int off0 = (y & 0b11000) << 8 | (y & 0b111) << 5 | x;
+            for (unsigned iy = 0; iy < 8; ++iy) {
+                uint8_t pix8 = vram.pix[off0 | iy << 8];
+                for (unsigned ix = 0; ix < 8; ++ix, pix8 <<= 1) {
+                    uint8_t pix = !!(0x80 & pix8);
+                    unsigned ci = (bright << 3)|(pix ? fg : bk);
+                    if (use_hq4) {
+                        int xo = (x * 8 + ix);
+                        int yo = (y * 8 + iy);
+                        vram.sinc_fb[yo * 256 + xo] = yuv_colors[ci];
+                    } else {
+                        SDL_SetRenderDrawColor(renderer, rgb_colors[ci] >> 16, rgb_colors[ci] >> 8, rgb_colors[ci], 255);
+                        int xo = (x * 8 + ix);
+                        int yo = (y * 8 + iy);
+                        uint8_t ci = get_sinclair_color(xo, yo);
+                        for (unsigned i = 0; i < 4; ++i)
+                            for (unsigned j = 0; j < 4; ++j)
+                                SDL_RenderDrawPoint(renderer, xo*4 + i, yo*4 + j);
+                    }
+                }
+            }
+        }
+    }
+#endif
+    if (use_hq4) {
+        hqx_filter(vram.sinc_fb, vram.sinc4_fb, 256, 192);
+        for (int y = 0; y < 768; ++y) {
+            for (int x = 0; x < 1024; ++x) {
+                int r, g, b;
+                yuv2rgb(vram.sinc4_fb[y*1024+x], r, g, b);
+                SDL_SetRenderDrawColor(renderer, r, g, b, 255);
+                SDL_RenderDrawPoint(renderer, x, y);
+            }
+        }
+    }
 }
 
 void draw()
