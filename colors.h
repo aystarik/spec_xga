@@ -20,15 +20,27 @@ extern const float r2y[3][3];
 extern const float y2r[3][3];
 
 inline void rgb2yuv(YUV_pixel &yuv, const RGB_pixel &rgb) {
+
     yuv.y = r2y[0][0]*rgb.r + r2y[0][1] * rgb.g + r2y[0][2] * rgb.b + 0.5;
     yuv.u = r2y[1][0]*rgb.r + r2y[1][1] * rgb.g + r2y[1][2] * rgb.b + 0.5;
     yuv.v = r2y[2][0]*rgb.r + r2y[2][1] * rgb.g + r2y[2][2] * rgb.b + 0.5;
 }
 
 inline void yuv2rgb(RGB_pixel &rgb, const YUV_pixel &yuv) {
+#if 0
     rgb.r = y2r[0][0]*yuv.y + y2r[0][1] * yuv.u + y2r[0][2] * yuv.v + 0.5;
     rgb.g = y2r[1][0]*yuv.y + y2r[1][1] * yuv.u + y2r[1][2] * yuv.v + 0.5;
     rgb.b = y2r[2][0]*yuv.y + y2r[2][1] * yuv.u + y2r[2][2] * yuv.v + 0.5;
+#else
+    /* approximate
+        1 0 45/32
+        1 -11/32 -23/32
+        1 56/32 0
+    */
+    rgb.r = yuv.y + yuv.v + (yuv.v >> 2) + (yuv.v >> 3) + (yuv.v >> 5);
+    rgb.g = yuv.y - (yuv.u >> 2) - (yuv.u >> 4) - (yuv.u >> 5) - (yuv.v >> 1) - (yuv.v >> 3) - (yuv.v >> 4) - (yuv.v >> 5);
+    rgb.b = yuv.y + yuv.u + (yuv.u >> 1) + (yuv.u >> 2);
+#endif
 }
 
 #if 0
@@ -45,10 +57,13 @@ inline bool diff(uint8_t i, uint8_t j) {
     return (i != j && (i != 0 || j != 8) && (i != 8 || j != 0));
 }
 
+inline uint8_t clip(uint8_t v) {return (v < 16)?16:(v>240)?240:v;}
+
 inline void sinc2rgb(RGB_pixel &rgb, uint8_t i) {
-    rgb.b = (i & 1) * (((i >> 3)&1) + 3) * 60;
-    rgb.g = ((i >> 1) & 1) * (((i >> 3)&1) + 3) * 60;
-    rgb.r = ((i >> 2) & 1) * (((i >> 3)&1) + 3) * 60;
+    // values are 0, 180 and 240 for each color component
+    rgb.b = clip((i & 1) * (((i >> 3)&1) + 3) * 60);
+    rgb.r = clip(((i >> 1) & 1) * (((i >> 3)&1) + 3) * 60);
+    rgb.g = clip(((i >> 2) & 1) * (((i >> 3)&1) + 3) * 60);
 }
 
 inline void sinc2yuv(YUV_pixel &yuv, uint8_t i) {
